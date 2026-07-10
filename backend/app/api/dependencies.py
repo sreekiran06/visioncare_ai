@@ -10,6 +10,7 @@ from ..db.session import get_db, SessionLocal
 from ..models.user import User
 from ..cv.detector import GestureDetector
 from ..cv.gesture_classifier import PatientGestureClassifier
+from ..cv.face_recognizer import FaceRecognizer
 from ..services import patient_service
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
@@ -17,8 +18,14 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 # Singleton GestureDetector instance so we load models once
 detector_instance = GestureDetector()
 
+# Singleton FaceRecognizer instance (loads InsightFace models once at startup)
+face_recognizer_instance = FaceRecognizer()
+
 def get_detector() -> GestureDetector:
     return detector_instance
+
+def get_face_recognizer() -> FaceRecognizer:
+    return face_recognizer_instance
 
 def get_current_user(db: Session = Depends(get_db), token: str = Depends(oauth2_scheme)) -> User:
     credentials_exception = HTTPException(

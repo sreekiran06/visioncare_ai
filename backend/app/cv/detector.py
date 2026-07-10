@@ -44,18 +44,112 @@ class GestureDetector:
         else:
             logger.warning(f"Landmark model file not found at {model_path}. Running in Mock Mode.")
 
+    # -- Mock scenario cycling --
+    _mock_scenario_index: int = 0
+    _mock_frame_in_scenario: int = 0
+    # Each scenario: (name, num_frames, metrics_fn)
+    _MOCK_SCENARIOS = [
+        # 1. Normal resting face  (40 frames – no gesture fires)
+        ("resting", 40, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": __import__("random").uniform(-1.5, 1.5),
+        }),
+        # 2. Sustained eyes-closed for 20 frames (triggers sustained_close)
+        ("sustained_close", 20, lambda: {
+            "ear": __import__("random").uniform(0.10, 0.17),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": __import__("random").uniform(-1.0, 1.0),
+        }),
+        # 3. Rest again
+        ("resting2", 30, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": __import__("random").uniform(-1.5, 1.5),
+        }),
+        # 4. Wide mouth open for 20 frames (triggers mouth_open / yawn)
+        ("mouth_open", 20, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.65, 0.80),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": __import__("random").uniform(-1.0, 1.0),
+        }),
+        # 5. Rest
+        ("resting3", 30, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": __import__("random").uniform(-1.5, 1.5),
+        }),
+        # 6. Head turned left for 20 frames (triggers head_left)
+        ("head_left", 20, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(1.35, 1.50),
+            "roll_angle": __import__("random").uniform(-2.0, 2.0),
+        }),
+        # 7. Rest
+        ("resting4", 30, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": __import__("random").uniform(-1.5, 1.5),
+        }),
+        # 8. Head turned right for 20 frames (triggers head_right)
+        ("head_right", 20, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.55, 0.65),
+            "roll_angle": __import__("random").uniform(-2.0, 2.0),
+        }),
+        # 9. Double blink – two quick closes separated by a brief open
+        ("double_blink_close1", 4, lambda: {
+            "ear": __import__("random").uniform(0.10, 0.16),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": 0.0,
+        }),
+        ("double_blink_open1", 3, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": 0.0,
+        }),
+        ("double_blink_close2", 4, lambda: {
+            "ear": __import__("random").uniform(0.10, 0.16),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": 0.0,
+        }),
+        ("double_blink_open2", 20, lambda: {
+            "ear": __import__("random").uniform(0.26, 0.32),
+            "mar": __import__("random").uniform(0.15, 0.22),
+            "yaw_ratio": __import__("random").uniform(0.97, 1.03),
+            "roll_angle": 0.0,
+        }),
+    ]
+
     def extract_metrics(self, frame_bytes: bytes) -> Optional[Dict[str, Any]]:
         # If in mock mode, return simulated metrics
         if self.mock_mode:
-            import random
-            # Simulate a face with normal fluctuations
-            return {
-                "ear": random.uniform(0.24, 0.32),
-                "mar": random.uniform(0.15, 0.25),
-                "yaw_ratio": random.uniform(0.95, 1.05),
-                "roll_angle": random.uniform(-2.0, 2.0)
-            }
-            
+            # Advance the scenario pointer
+            scenarios = self.__class__._MOCK_SCENARIOS
+            idx = self.__class__._mock_scenario_index % len(scenarios)
+            name, num_frames, metrics_fn = scenarios[idx]
+
+            metrics = metrics_fn()
+
+            self.__class__._mock_frame_in_scenario += 1
+            if self.__class__._mock_frame_in_scenario >= num_frames:
+                self.__class__._mock_frame_in_scenario = 0
+                self.__class__._mock_scenario_index = (idx + 1) % len(scenarios)
+
+            return metrics
+
+
         # Real Mode
         try:
             nparr = np.frombuffer(frame_bytes, np.uint8)

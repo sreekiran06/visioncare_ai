@@ -42,6 +42,18 @@ app.include_router(websocket.router, tags=["websockets"])
 def startup_event():
     logger.info("Initializing database tables...")
     try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        if "patients" in inspector.get_table_names():
+            columns = [c["name"] for c in inspector.get_columns("patients")]
+            if "face_embedding" not in columns:
+                logger.info("Database schema is out of date (missing face_embedding). Migrating columns...")
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE patients ADD COLUMN face_embedding JSON DEFAULT NULL"))
+                    conn.execute(text("ALTER TABLE patients ADD COLUMN face_calibrated BOOLEAN DEFAULT 0"))
+                    conn.execute(text("ALTER TABLE patients ADD COLUMN face_similarity_threshold JSON DEFAULT NULL"))
+                logger.info("Database migration completed.")
+        
         Base.metadata.create_all(bind=engine)
         logger.info("Database tables initialized successfully.")
     except Exception as e:

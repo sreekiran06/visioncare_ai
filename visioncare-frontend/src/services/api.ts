@@ -68,6 +68,18 @@ export const calibrationApi = {
   ) => api.post(`/api/calibration/${patientId}/sample`, payload),
   complete: (patientId: string) =>
     api.post(`/api/calibration/${patientId}/complete`),
+  // ── Face Recognition ──────────────────────────────────────────────
+  captureFace: (
+    patientId: string,
+    frames: string[],
+    threshold: number = 0.75
+  ) =>
+    api.post(`/api/calibration/${patientId}/face/capture`, {
+      frames,
+      threshold,
+    }),
+  getFaceStatus: (patientId: string) =>
+    api.get(`/api/calibration/${patientId}/face/status`),
 };
 
 // ---- Detections / Requests ----

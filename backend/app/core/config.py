@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     MAR_THRESHOLD: float = 0.6
     CONSECUTIVE_FRAMES_ALERT: int = 15
     DETECTOR_MODEL_PATH: str = "app/cv/models/shape_predictor_68_face_landmarks.dat"
+    # Set to True to enable real InsightFace ArcFace model (downloads ~200 MB on first run)
+    # Leave False (default) to use the fast built-in mock mode for development / demo
+    FACE_RECOGNIZER_REAL_MODE: bool = False
     
     # Notifications
     NOTIFICATIONS_ENABLED: bool = False
