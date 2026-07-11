@@ -33,15 +33,6 @@ class Patient(Base, TimestampMixin):
     
     # Patient-specific thresholds (JSON for flexibility)
     thresholds = Column(JSON, default=dict)
-
-    # ── Face Recognition ──────────────────────────────────────────────
-    # ArcFace 512-dim embedding stored as a JSON list of floats.
-    # None means the patient has not been through face-calibration yet.
-    face_embedding = Column(JSON, nullable=True, default=None)
-    # True once face_embedding has been successfully captured
-    face_calibrated = Column(Boolean, default=False)
-    # Per-patient similarity threshold (overrides the global default of 0.75)
-    face_similarity_threshold = Column(JSON, nullable=True, default=None)
     
     def __repr__(self):
         return f"<Patient {self.name} - Bed {self.bed_number}>"

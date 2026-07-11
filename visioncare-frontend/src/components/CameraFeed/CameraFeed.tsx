@@ -2,49 +2,36 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import Webcam from "react-webcam";
 import { ConnectionStatus } from "../../types";
 
-interface IdentityStatus {
-  status: "matched" | "unknown" | "uncalibrated";
-  similarity: number;
-  threshold: number;
-}
-
 interface CameraFeedProps {
   patientId: string;
   wsUrl?: string;
   frameIntervalMs?: number;
   onStatusChange?: (status: ConnectionStatus) => void;
-  onIdentityChange?: (identity: IdentityStatus) => void;
 }
 
-const DEFAULT_WS_URL = process.env.REACT_APP_WS_URL ?? "ws://localhost:8000";
+const DEFAULT_WS_URL = process.env.REACT_APP_WS_URL ?? "ws://localhost:8001";
 
 /**
  * Streams JPEG frames from the bedside camera to the backend gesture
- * pipeline over WebSocket. Shows identity verification overlay.
- * 
- * Pipeline on each frame:
- *   Frontend → (base64 JPEG) → Backend
- *   Backend  → Face Recognition → Identity Gate → Gesture Detection
- *   Backend  → (identity JSON)  → Frontend overlay
+ * pipeline over WebSocket. Runs on the patient-facing device, not the
+ * nurse dashboard.
  */
 export const CameraFeed: React.FC<CameraFeedProps> = ({
   patientId,
   wsUrl = DEFAULT_WS_URL,
   frameIntervalMs = 200,
   onStatusChange,
-  onIdentityChange,
 }) => {
   const webcamRef = useRef<Webcam>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [identity, setIdentity] = useState<IdentityStatus>({
-    status: "uncalibrated",
-    similarity: 0,
-    threshold: 0.75,
-  });
-  // How long to keep showing the last identity status (ms)
-  const identityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [processedImage, setProcessedImage] = useState<string | null>(null);
+  const [ear, setEar] = useState<number>(0.3);
+  const [mar, setMar] = useState<number>(0.2);
+  const [activeGesture, setActiveGesture] = useState<string>("resting");
+  const [progress, setProgress] = useState<number>(0);
 
   const updateStatus = useCallback(
     (next: ConnectionStatus) => {
@@ -52,19 +39,6 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({
       onStatusChange?.(next);
     },
     [onStatusChange]
-  );
-
-  const updateIdentity = useCallback(
-    (next: IdentityStatus) => {
-      setIdentity(next);
-      onIdentityChange?.(next);
-      // Auto-reset to uncalibrated after 3 s of no messages
-      if (identityTimeoutRef.current) clearTimeout(identityTimeoutRef.current);
-      identityTimeoutRef.current = setTimeout(() => {
-        setIdentity((prev) => ({ ...prev, status: "uncalibrated" }));
-      }, 3000);
-    },
-    [onIdentityChange]
   );
 
   useEffect(() => {
@@ -83,61 +57,44 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({
 
     socket.onmessage = (event) => {
       try {
-        const msg = JSON.parse(event.data as string);
-        if (msg.type === "identity") {
-          updateIdentity({
-            status: msg.status as "matched" | "unknown",
-            similarity: msg.similarity ?? 0,
-            threshold: msg.threshold ?? 0.75,
-          });
+        const data = JSON.parse(event.data);
+        if (data.type === "processed_frame") {
+          setProcessedImage(data.image);
+        } else if (data.type === "telemetry") {
+          setEar(data.ear);
+          setMar(data.mar);
+          setActiveGesture(data.active_gesture);
+          setProgress(data.progress);
         }
-      } catch {
-        // Binary or non-JSON message — ignore
+      } catch (err) {
+        // Safe skip
       }
     };
 
-    socket.onclose = () => updateStatus("disconnected");
+    socket.onclose = () => {
+      updateStatus("disconnected");
+      setProcessedImage(null);
+    };
     socket.onerror = () => socket.close();
 
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
-      if (identityTimeoutRef.current) clearTimeout(identityTimeoutRef.current);
       socket.close();
     };
-  }, [patientId, wsUrl, frameIntervalMs, updateStatus, updateIdentity]);
+  }, [patientId, wsUrl, frameIntervalMs, updateStatus]);
 
-  // ── Identity badge config ──────────────────────────────────────────
-  const identityConfig = {
-    matched: {
-      dot: "bg-emerald-400",
-      text: "text-emerald-300",
-      border: "border-emerald-400/40",
-      bg: "bg-emerald-900/60",
-      label: "Identity Verified",
-      icon: "✅",
-    },
-    unknown: {
-      dot: "bg-red-400 animate-ping",
-      text: "text-red-300",
-      border: "border-red-400/40",
-      bg: "bg-red-900/60",
-      label: "Unknown Person",
-      icon: "🚫",
-    },
-    uncalibrated: {
-      dot: "bg-slate-400",
-      text: "text-slate-300",
-      border: "border-slate-500/40",
-      bg: "bg-slate-900/60",
-      label: "Face ID Inactive",
-      icon: "👤",
-    },
+  const getGestureLabel = (g: string) => {
+    if (g === "eyes_closed") return "Sustained Eyes Closed";
+    if (g === "mouth_open") return "Mouth Opened / Yawn";
+    if (g === "head_left") return "Head Turn Left";
+    if (g === "head_right") return "Head Turn Right";
+    return "Normal / Resting";
   };
 
-  const cfg = identityConfig[identity.status];
-
   return (
-    <div className="relative aspect-video bg-slate-950 rounded-xl overflow-hidden">
+    <div className="relative aspect-video bg-slate-950 rounded-2xl overflow-hidden shadow-2xl border border-slate-800">
+
+      {/* ── Raw webcam feed – always visible as the base layer ── */}
       <Webcam
         ref={webcamRef}
         audio={false}
@@ -147,44 +104,93 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({
         mirrored
       />
 
-      {/* ── Connection status — top right ── */}
-      <div className="absolute top-3 right-3 flex items-center gap-2 bg-black/50 backdrop-blur-sm rounded-full px-3 py-1.5 border border-white/10">
+      {/* ── Processed frame from backend (landmark points mask overlay) ──
+           Shown on top of raw feed when backend sends it back.
+           Falls back to raw webcam if backend is in mock mode / cv2 unavailable. */}
+      {processedImage && (
+        <img
+          src={processedImage}
+          alt="Processed feed with landmark points"
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      )}
+
+      {/* Connection Indicator */}
+      <div className="absolute top-3 right-3 flex items-center gap-2 bg-slate-900/80 backdrop-blur border border-slate-800 rounded-full px-3 py-1 shadow-md">
         <span
           className={`h-2 w-2 rounded-full ${
             status === "connected"
-              ? "bg-emerald-400"
+              ? "bg-emerald-400 animate-pulse"
               : status === "connecting"
               ? "bg-amber-400 animate-pulse"
-              : "bg-red-400"
+              : "bg-rose-500"
           }`}
         />
-        <span className="text-white text-xs font-medium capitalize">{status}</span>
+        <span className="text-white text-xs font-mono font-semibold uppercase">{status}</span>
       </div>
 
-      {/* ── Identity status — bottom left ── */}
-      <div
-        className={`absolute bottom-3 left-3 flex items-center gap-2 backdrop-blur-sm
-                    rounded-xl px-3 py-2 border transition-all duration-500
-                    ${cfg.bg} ${cfg.border}`}
-      >
-        <span className="text-base leading-none">{cfg.icon}</span>
-        <div>
-          <p className={`text-xs font-semibold ${cfg.text}`}>{cfg.label}</p>
-          {identity.status !== "uncalibrated" && (
-            <p className="text-slate-400 text-[10px] mt-0.5">
-              Similarity: {(identity.similarity * 100).toFixed(0)}%
-              {" · "}
-              Threshold: {(identity.threshold * 100).toFixed(0)}%
-            </p>
+      {/* AI status badge */}
+      <div className="absolute top-3 left-3 bg-slate-900/80 backdrop-blur border border-slate-800 rounded-lg px-2.5 py-1 text-[10px] font-mono font-semibold shadow-md flex items-center gap-1.5">
+        <span className={`w-1.5 h-1.5 rounded-full ${processedImage ? "bg-emerald-400 animate-ping" : "bg-amber-400"}`} />
+        <span className={processedImage ? "text-emerald-400" : "text-amber-400"}>
+          {processedImage ? "AI LANDMARK ACTIVE" : "RAW FEED"}
+        </span>
+      </div>
+
+      {/* Telemetry HUD Overlay */}
+      {status === "connected" && (
+        <div className="absolute bottom-0 inset-x-0 p-4 bg-gradient-to-t from-slate-950/90 via-slate-950/60 to-transparent flex flex-col gap-3">
+          {/* Active Gesture Banner */}
+          <div className="flex items-center justify-between">
+            <div>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Active Gesture State</span>
+              <p className="text-sm font-bold text-white mt-0.5">{getGestureLabel(activeGesture)}</p>
+            </div>
+            {activeGesture !== "resting" && (
+              <div className="flex items-center gap-2 bg-brand-500/20 border border-brand-500/30 rounded-lg px-2 py-0.5 animate-pulse">
+                <span className="w-1.5 h-1.5 rounded-full bg-brand-500" />
+                <span className="text-xs font-semibold text-brand-300">Capturing: {Math.round(progress * 100)}%</span>
+              </div>
+            )}
+          </div>
+
+          {/* Progress Bar for Sustained Gesture */}
+          {activeGesture !== "resting" && (
+            <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-brand-500 transition-all duration-150 rounded-full shadow-glow"
+                style={{ width: `${progress * 100}%` }}
+              />
+            </div>
           )}
-        </div>
-      </div>
 
-      {/* ── "Unknown Person" full-frame red pulse overlay ── */}
-      {identity.status === "unknown" && (
-        <div className="absolute inset-0 pointer-events-none">
-          <div className="absolute inset-0 border-4 border-red-500 rounded-xl animate-pulse" />
-          <div className="absolute inset-0 bg-red-900/10" />
+          {/* EAR & MAR Telemetry meters */}
+          <div className="grid grid-cols-2 gap-4 pt-1">
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px] font-mono font-semibold text-slate-400">
+                <span>Eye Ratio (EAR)</span>
+                <span>{ear.toFixed(2)}</span>
+              </div>
+              <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-sky-500 rounded-full transition-all duration-150"
+                  style={{ width: `${Math.min(100, ear * 250)}%` }}
+                />
+              </div>
+            </div>
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px] font-mono font-semibold text-slate-400">
+                <span>Mouth Ratio (MAR)</span>
+                <span>{mar.toFixed(2)}</span>
+              </div>
+              <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-violet-500 rounded-full transition-all duration-150"
+                  style={{ width: `${Math.min(100, mar * 125)}%` }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -192,3 +198,4 @@ export const CameraFeed: React.FC<CameraFeedProps> = ({
 };
 
 export default CameraFeed;
+

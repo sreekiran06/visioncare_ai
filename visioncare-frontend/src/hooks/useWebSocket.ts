@@ -7,12 +7,15 @@ interface UseWebSocketReturn {
   connectionStatus: ConnectionStatus;
 }
 
+const INITIAL_DELAY_MS = 500;       // wait briefly before first connect attempt
 const RECONNECT_DELAY_MS = 2000;
 const MAX_RECONNECT_DELAY_MS = 15000;
 
 /**
  * Wraps a native WebSocket with auto-reconnect (exponential backoff)
  * and exposes the last received message plus connection status.
+ * Uses a short initial delay to avoid "closed before connection established"
+ * errors from React StrictMode's double-invoke of effects.
  */
 export function useWebSocket(url: string): UseWebSocketReturn {
   const [lastMessage, setLastMessage] = useState<MessageEvent | null>(null);
@@ -25,8 +28,31 @@ export function useWebSocket(url: string): UseWebSocketReturn {
   const shouldReconnect = useRef(true);
 
   const connect = useCallback(() => {
+    // Don't open a new connection if we're already open or connecting
+    if (
+      wsRef.current &&
+      (wsRef.current.readyState === WebSocket.OPEN ||
+        wsRef.current.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+
     setConnectionStatus("connecting");
-    const socket = new WebSocket(url);
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(url);
+    } catch (err) {
+      // Invalid URL or browser blocked – schedule a retry
+      const delay = Math.min(
+        RECONNECT_DELAY_MS * 2 ** reconnectAttempts.current,
+        MAX_RECONNECT_DELAY_MS
+      );
+      reconnectAttempts.current += 1;
+      if (shouldReconnect.current) {
+        reconnectTimer.current = setTimeout(connect, delay);
+      }
+      return;
+    }
     wsRef.current = socket;
 
     socket.onopen = () => {
@@ -51,18 +77,26 @@ export function useWebSocket(url: string): UseWebSocketReturn {
     };
 
     socket.onerror = () => {
-      socket.close();
+      // onclose will fire after onerror, triggering reconnect logic there
+      if (socket.readyState !== WebSocket.CLOSED) {
+        socket.close();
+      }
     };
   }, [url]);
 
   useEffect(() => {
     shouldReconnect.current = true;
-    connect();
+
+    // Small initial delay avoids React StrictMode double-effect race
+    reconnectTimer.current = setTimeout(connect, INITIAL_DELAY_MS);
 
     return () => {
       shouldReconnect.current = false;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
+      const ws = wsRef.current;
+      if (ws && ws.readyState !== WebSocket.CLOSED) {
+        ws.close();
+      }
     };
   }, [connect]);
 

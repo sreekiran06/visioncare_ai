@@ -5,23 +5,16 @@ import json
 import logging
 from uuid import UUID
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
 from ...cv.detector import GestureDetector
 from ...cv.gesture_classifier import PatientGestureClassifier
-from ...cv.face_recognizer import FaceRecognizer
-from ..dependencies import get_detector, get_patient, get_patient_classifier, get_face_recognizer
+from ..dependencies import get_detector, get_patient, get_patient_classifier
 from ...services import patient_service
 from ...services.notification import send_nurse_notification
 from ...db.session import SessionLocal
 
 router = APIRouter()
-
-# ──────────────────────────────────────────────────────────────────────
-# Connection Manager
-# ──────────────────────────────────────────────────────────────────────
 
 class ConnectionManager:
     def __init__(self):
@@ -50,15 +43,11 @@ class ConnectionManager:
             for connection in self.nurse_connections[ward_id]:
                 try:
                     await connection.send_json(message)
-                except Exception:
+                except:
                     dead_connections.add(connection)
             self.nurse_connections[ward_id] -= dead_connections
 
 manager = ConnectionManager()
-
-# ──────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────
 
 async def update_request_status(request_id: str, status: str, nurse_id: str):
     db = SessionLocal()
@@ -72,10 +61,6 @@ async def update_request_status(request_id: str, status: str, nurse_id: str):
     finally:
         db.close()
 
-# ──────────────────────────────────────────────────────────────────────
-# Nurse dashboard WebSocket
-# ──────────────────────────────────────────────────────────────────────
-
 @router.websocket("/ws/nurse/{ward_id}")
 async def nurse_dashboard_websocket(websocket: WebSocket, ward_id: str):
     await manager.connect_nurse(websocket, ward_id)
@@ -88,23 +73,20 @@ async def nurse_dashboard_websocket(websocket: WebSocket, ward_id: str):
                     status=data["status"],
                     nurse_id=data["nurse_id"]
                 )
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
         manager.disconnect_nurse(websocket, ward_id)
-
-# ──────────────────────────────────────────────────────────────────────
-# Camera feed WebSocket  ← identity-gated gesture recognition
-# ──────────────────────────────────────────────────────────────────────
 
 @router.websocket("/ws/camera/{patient_id}")
 async def camera_feed_websocket(
-    websocket: WebSocket,
+    websocket: WebSocket, 
     patient_id: str,
-    detector: GestureDetector = Depends(get_detector),
-    recognizer: FaceRecognizer = Depends(get_face_recognizer),
+    detector: GestureDetector = Depends(get_detector)
 ):
     await manager.connect_camera(websocket, patient_id)
 
-    # ── Validate UUID ──────────────────────────────────────────────────
+    # Gracefully look up the patient – don't crash the socket if not found
     try:
         patient_uuid = UUID(patient_id)
     except ValueError:
@@ -112,53 +94,30 @@ async def camera_feed_websocket(
         await websocket.close()
         return
 
-    # ── Load patient (non-fatal if not found) ─────────────────────────
     try:
         patient = await get_patient(patient_uuid)
     except Exception:
+        # Patient not found – keep socket open so UI shows "connected" but skip broadcasts
         patient = None
 
     classifier = await get_patient_classifier(patient_uuid) if patient else None
 
-    # ── Load stored face embedding ─────────────────────────────────────
-    stored_embedding: np.ndarray | None = None
-    face_threshold: float = 0.75
-    face_calibrated: bool = False
-
-    if patient:
-        if patient.face_calibrated and patient.face_embedding:
-            stored_embedding = FaceRecognizer.embedding_from_list(patient.face_embedding)
-            face_threshold = patient.face_similarity_threshold or 0.75
-            face_calibrated = True
-            logger.info(f"Patient {patient.name}: face embedding loaded (threshold={face_threshold})")
-        else:
-            logger.warning(
-                f"Patient {patient.name} has no face embedding — "
-                "identity verification DISABLED (all frames accepted)."
-            )
-
     import base64
-
-    # ── Per-frame identity skip counter (avoid spamming WebSocket) ─────
-    # Send identity status every N frames to keep bandwidth reasonable
-    IDENTITY_REPORT_EVERY = 5
-    frame_count = 0
 
     try:
         while True:
-            # ── Receive frame (text = base64 data URL) ─────────────────
+            # Receive frame – the frontend sends base64 JPEG data URLs as text
             try:
                 raw = await websocket.receive_text()
             except Exception:
-                try:
-                    raw_bytes = await websocket.receive_bytes()
-                    raw = None
-                except Exception:
-                    continue
+                # Fallback: try bytes
+                raw_bytes = await websocket.receive_bytes()
+                raw = None
 
-            # ── Decode base64 → bytes ───────────────────────────────────
+            # Convert base64 data URL → bytes
             if raw is not None:
                 try:
+                    # Strip optional "data:image/jpeg;base64," prefix
                     if "," in raw:
                         raw = raw.split(",", 1)[1]
                     frame_data = base64.b64decode(raw)
@@ -167,42 +126,63 @@ async def camera_feed_websocket(
             else:
                 frame_data = raw_bytes
 
-            frame_count += 1
-
-            # ── ① Face Recognition / Identity Verification ─────────────
-            identity_matched = True   # default: pass-through when not calibrated
-            similarity = 1.0
-
-            if face_calibrated and stored_embedding is not None:
-                live_embedding = recognizer.extract_embedding(frame_data)
-                identity_matched, similarity = recognizer.is_match(
-                    live_embedding, stored_embedding, threshold=face_threshold
-                )
-
-                # Send identity status back to the camera client periodically
-                if frame_count % IDENTITY_REPORT_EVERY == 0:
-                    try:
-                        await websocket.send_json({
-                            "type": "identity",
-                            "status": "matched" if identity_matched else "unknown",
-                            "similarity": round(similarity, 3),
-                            "threshold": face_threshold,
-                        })
-                    except Exception:
-                        pass
-
-                if not identity_matched:
-                    # Unknown person — skip gesture recognition entirely
-                    continue
-
-            # ── ② Gesture Recognition (only for verified patient) ───────
+            # Process frame
             metrics = detector.extract_metrics(frame_data)
+            
+            # Decode, apply landmarks points mask, re-encode, and send back to camera websocket
+            try:
+                import cv2
+                import numpy as np
+                nparr = np.frombuffer(frame_data, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img is not None:
+                    from app.cv.mask_effects import draw_landmarks_mask
+                    landmarks = metrics.get("landmarks") if metrics else None
+                    if landmarks:
+                        img = draw_landmarks_mask(img, landmarks)
+                    _, buffer = cv2.imencode('.jpg', img)
+                    masked_b64 = base64.b64encode(buffer).decode('utf-8')
+                    await websocket.send_json({
+                        "type": "processed_frame",
+                        "image": f"data:image/jpeg;base64,{masked_b64}"
+                    })
+            except Exception as e:
+                logger.error(f"Error applying landmarks points mask in websocket: {e}")
+
+            # Send telemetry and gesture feedback back to monitor
+            if metrics:
+                current_active = "resting"
+                progress = 0.0
+                if classifier:
+                    consec = getattr(classifier, "consecutive_frames", 15)
+                    if getattr(classifier, "close_frames", 0) > 0:
+                        current_active = "eyes_closed"
+                        progress = min(1.0, classifier.close_frames / consec)
+                    elif getattr(classifier, "open_mouth_frames", 0) > 0:
+                        current_active = "mouth_open"
+                        progress = min(1.0, classifier.open_mouth_frames / consec)
+                    elif getattr(classifier, "head_left_frames", 0) > 0:
+                        current_active = "head_left"
+                        progress = min(1.0, classifier.head_left_frames / consec)
+                    elif getattr(classifier, "head_right_frames", 0) > 0:
+                        current_active = "head_right"
+                        progress = min(1.0, classifier.head_right_frames / consec)
+
+                await websocket.send_json({
+                    "type": "telemetry",
+                    "ear": metrics.get("ear", 0.3),
+                    "mar": metrics.get("mar", 0.2),
+                    "active_gesture": current_active,
+                    "progress": progress
+                })
+
             if metrics and classifier and patient:
                 result = classifier.process_frame(metrics)
-
+                
                 if result:
                     gesture_type, need_type, confidence = result
-
+                    
+                    # Create detection record
                     db = SessionLocal()
                     try:
                         detection = patient_service.create_detection(
@@ -210,10 +190,10 @@ async def camera_feed_websocket(
                             patient_id=patient_uuid,
                             gesture_type=gesture_type,
                             need_type=need_type,
-                            confidence=confidence,
+                            confidence=confidence
                         )
-
-                        # Broadcast alert to nurse dashboard
+                        
+                        # Broadcast to ward nurses
                         await manager.broadcast_to_ward(
                             patient.ward_id,
                             {
@@ -223,18 +203,21 @@ async def camera_feed_websocket(
                                 "bed_number": patient.bed_number,
                                 "need": need_type.value,
                                 "confidence": confidence,
-                                "face_similarity": round(similarity, 3),
                                 "timestamp": detection.created_at.isoformat(),
-                                "request_id": str(detection.id),
-                            },
+                                "request_id": str(detection.id)
+                            }
                         )
-
+                        
+                        # Send push notification
                         await send_nurse_notification(patient.ward_id, detection)
-                    except Exception as exc:
-                        logger.error(f"Error saving detection: {exc}")
+                    except Exception as e:
+                        logger.error(f"Error saving detection: {e}")
                     finally:
                         db.close()
-
-    except WebSocketDisconnect:
+                        
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
         if patient_id in manager.camera_connections:
             del manager.camera_connections[patient_id]
+

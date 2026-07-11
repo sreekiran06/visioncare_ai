@@ -21,8 +21,6 @@ bcrypt
 # dlib==19.24.6
 # opencv-python-headless==4.10.0.84
 numpy>=2.0
-insightface>=0.7.3          # ArcFace face embeddings via ONNX (no C++ compilation)
-onnxruntime>=1.19.0         # ONNX runtime for insightface models
 
 # --- Notifications (app/services/notification.py) ---
 twilio==9.3.2                  # SMS escalation; omit if SMS alerts aren't needed

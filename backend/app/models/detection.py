@@ -1,5 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, Enum, Float, Integer, DateTime, Boolean, JSON
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, ForeignKey, Enum, Float, Integer, DateTime, Boolean, JSON, Uuid
 from sqlalchemy.orm import relationship
 import uuid
 import enum
@@ -18,8 +17,8 @@ class RequestStatus(str, enum.Enum):
 class Detection(Base, TimestampMixin):
     __tablename__ = "detections"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    patient_id = Column(UUID(as_uuid=True), ForeignKey("patients.id"), nullable=False)
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    patient_id = Column(Uuid, ForeignKey("patients.id"), nullable=False)
     gesture_type = Column(Enum(GestureType), nullable=False)
     need_type = Column(Enum(NeedType), nullable=False)
     confidence = Column(Float, nullable=False)
@@ -42,11 +41,11 @@ class Detection(Base, TimestampMixin):
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     timestamp = Column(DateTime, nullable=False)
     event_type = Column(String(50), nullable=False)
     entity_type = Column(String(50), nullable=False)
-    entity_id = Column(UUID(as_uuid=True))
+    entity_id = Column(Uuid)
     actor_id = Column(String(100))  # User/nurse who performed action
     details = Column(JSON)
     ip_address = Column(String(45))

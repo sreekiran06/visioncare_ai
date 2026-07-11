@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from "axios";
 
 const API_BASE_URL =
-  process.env.REACT_APP_API_URL ?? "http://localhost:8000";
+  process.env.REACT_APP_API_URL ?? "http://localhost:8001";
 
 export const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
@@ -68,18 +68,6 @@ export const calibrationApi = {
   ) => api.post(`/api/calibration/${patientId}/sample`, payload),
   complete: (patientId: string) =>
     api.post(`/api/calibration/${patientId}/complete`),
-  // ── Face Recognition ──────────────────────────────────────────────
-  captureFace: (
-    patientId: string,
-    frames: string[],
-    threshold: number = 0.75
-  ) =>
-    api.post(`/api/calibration/${patientId}/face/capture`, {
-      frames,
-      threshold,
-    }),
-  getFaceStatus: (patientId: string) =>
-    api.get(`/api/calibration/${patientId}/face/status`),
 };
 
 // ---- Detections / Requests ----

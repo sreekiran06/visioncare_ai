@@ -2,14 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from uuid import UUID
 import base64
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 from ...db.session import get_db
 from ...models.patient import Patient
 from ...models.gesture import GestureType, CalibrationSample
 from ...schemas.schemas import CalibrationSession, CalibrationSampleCreate
-from ..dependencies import get_current_user, get_detector, get_face_recognizer
-from ...cv.face_recognizer import FaceRecognizer
+from ..dependencies import get_current_user, get_detector
 
 router = APIRouter()
 
@@ -40,101 +39,6 @@ GESTURE_INSTRUCTIONS = {
         "demoVideo": ""
     }
 }
-
-# ──────────────────────────────────────────────────────────────────────
-# Face Capture endpoints (new – Step 0 of calibration)
-# ──────────────────────────────────────────────────────────────────────
-
-from pydantic import BaseModel
-
-class FaceCapturePayload(BaseModel):
-    frames: List[str]          # List of base64-encoded JPEG frames (20–30 recommended)
-    threshold: float = 0.75    # Optional per-patient override
-
-
-@router.post("/{patient_id}/face/capture")
-def capture_face_embedding(
-    patient_id: UUID,
-    payload: FaceCapturePayload,
-    db: Session = Depends(get_db),
-    recognizer: FaceRecognizer = Depends(get_face_recognizer),
-    current_user=Depends(get_current_user),
-):
-    """
-    Step 0 of calibration: capture 20–30 frames of the patient's face,
-    extract ArcFace embeddings, average them, and store in the database.
-    """
-    patient = db.query(Patient).filter(
-        Patient.id == patient_id, Patient.is_active == True
-    ).first()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    embeddings = []
-    frames_processed = 0
-
-    for frame_b64 in payload.frames:
-        # Strip data URL prefix if present
-        if "," in frame_b64:
-            frame_b64 = frame_b64.split(",", 1)[1]
-        try:
-            frame_bytes = base64.b64decode(frame_b64)
-            emb = recognizer.extract_embedding(frame_bytes)
-            if emb is not None:
-                embeddings.append(emb)
-            frames_processed += 1
-        except Exception:
-            pass
-
-    if not embeddings:
-        raise HTTPException(
-            status_code=422,
-            detail="No face detected in any of the provided frames. "
-                   "Ensure the patient is well-lit and facing the camera.",
-        )
-
-    # Average all detected embeddings → single representative vector
-    avg_embedding = recognizer.average_embeddings(embeddings)
-
-    # Persist
-    patient.face_embedding = FaceRecognizer.embedding_to_list(avg_embedding)
-    patient.face_calibrated = True
-    patient.face_similarity_threshold = payload.threshold
-    db.commit()
-
-    return {
-        "success": True,
-        "frames_submitted": len(payload.frames),
-        "frames_processed": frames_processed,
-        "faces_detected": len(embeddings),
-        "threshold_stored": payload.threshold,
-        "message": f"Face profile captured from {len(embeddings)} frames.",
-    }
-
-
-@router.get("/{patient_id}/face/status")
-def get_face_calibration_status(
-    patient_id: UUID,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-):
-    """Returns whether this patient has a stored face embedding."""
-    patient = db.query(Patient).filter(
-        Patient.id == patient_id, Patient.is_active == True
-    ).first()
-    if not patient:
-        raise HTTPException(status_code=404, detail="Patient not found")
-
-    return {
-        "patient_id": str(patient_id),
-        "face_calibrated": patient.face_calibrated,
-        "threshold": patient.face_similarity_threshold or 0.75,
-    }
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Existing calibration endpoints (unchanged)
-# ──────────────────────────────────────────────────────────────────────
 
 @router.post("/{patient_id}/start", response_model=CalibrationSession)
 def start_calibration(patient_id: UUID, db: Session = Depends(get_db), current_user = Depends(get_current_user)):
